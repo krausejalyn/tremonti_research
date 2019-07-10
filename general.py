@@ -7,15 +7,16 @@ from astropy.visualization import quantity_support
 from astropy.cosmology import FlatLambdaCDM as flc
 from astropy.table import Table, Column
 from astropy.modeling import models
+from scipy import optimize
+from scipy.stats import powerlaw
 import astropy.table as t
 import numpy as np
 import math
 import warnings
 import random
 import os
+import sys
 import scipy.stats.distributions as dist # from Ewan Cameron's paper
-from scipy import optimize
-from scipy.stats import powerlaw
 
 # Ignores annyoying warnings
 plt.rcParams.update({'figure.max_open_warning': 0})
@@ -281,7 +282,7 @@ def get_massmap(plateifu, p3ddir, drpall):
     sig_cor = 2*np.log10((0.5/cosmo.arcsec_per_kpc_proper(z).value))
     mass = mass-sig_cor + np.log10(ba)
     mass_err = mass_err-sig_cor + np.log10(ba)
-    
+
     return mass, mass_err
 
  # Function for getting a galaxy's radius in arcseconds
@@ -305,9 +306,9 @@ def get_met_n2o2(plate, ifu):
 
 def six_pannel(plateifu, plate, ifu, mass, mass_err, reff):
     plt.figure(figsize = (20,9), facecolor = 'white')
-
-    rad = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/radius.npy') # Elliptical radius in units of arcseconds
  
+    rad = get_radius(plate, ifu) # Elliptical radius in units of arcseconds
+
     # SFR surface density in units of M_sun/yr/kpc^2. It assumes a flat lambdaCDM cosmology with h=0.7, Omega_lambda=0.7, Omega_matter=0.3. SFR surface density is corrected for inclination using the Petrossian b/a values, so they are probably not accurate for highly inclined systems. 
     sfrd = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/sfr_map.npy')
     
@@ -318,6 +319,7 @@ def six_pannel(plateifu, plate, ifu, mass, mass_err, reff):
     ha_ew = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/ha_ew.npy')
     
     n2s2_met = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2s2_met.npy') # Dopita N2S2 Halpha metallcity
+    
     n2s2_met_err = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2s2_met_err.npy') # Error on Dopita 2016 metallicity, calculated by standard error propagation
     n2s2_mask = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2s2_mask.npy') # Mask for N2S2 metallcity. 1 if S/N of all lines used >3
     
@@ -326,6 +328,10 @@ def six_pannel(plateifu, plate, ifu, mass, mass_err, reff):
     n2o2_met_err = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2o2_met_err.npy') # Error on the N2O2 metallcity. This is derived by a Monte Carlo method.
     
     n2o2_mask = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2o2_mask.npy') # 1 if ([NII]6583/[NII]6583_err > 3 ) & ([OII]3727/[OII]3727_err > 3) & ([OII]3729/[OII]3729_err > 3 ) & (ha/ha_err>3) & (hb/hb_err > 3), 0 otherwise.
+    
+    pp04_met = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/pp04_o3n2_met.npy')
+    
+    pp04_met_err = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/pp04_o3n2_met_err.npy')
     
     n2o2_bad = (n2o2_mask == 0) | (issf == 0) | (n2o2_met_err > 0.1) | (ha_ew < 6)
     n2o2_met[n2o2_bad] = np.nan
@@ -336,22 +342,26 @@ def six_pannel(plateifu, plate, ifu, mass, mass_err, reff):
     n2s2_met_err[n2s2_bad] =np.nan
     n2s2_met[n2s2_bad] = np.nan
     
+    pp04_bad = (issf == 0) | (pp04_met_err > 0.1) | (ha_ew < 6)
+    pp04_met_err[pp04_bad] =np.nan
+    pp04_met[pp04_bad] = np.nan
+    
     bad_mass = mass < 3
     mass[bad_mass] = np.nan
     
     sfrd_bad = (issf == 0)
     sfrd[sfrd_bad] = np.nan
     
-    rad = rad/reff # Radial measurements now in units from in Re, was in arcseconds
+    rad = rad/reff # Radial measurements now in units of Re, was in arcseconds
     rmax = int(np.max(rad))
-    r_edge = np.linspace(0,rmax,rmax+1)
+    r_edge = np.linspace(0,rmax,len(rad))
     r = np.zeros(len(r_edge) -1) * np.nan # radius
     s = np.zeros(len(r_edge) -1) * np.nan # SFRD
     m = np.zeros(len(r_edge) -1) * np.nan # stellar mass surface density
     rp_n2s2 = np.zeros(len(r_edge) -1) * np.nan # rp = the average value of metallicity at that radius
     rp_n2o2 = np.zeros(len(r_edge) -1) * np.nan
+    rp_pp04 = np.zeros(len(r_edge)-1) * np.nan
     
-    print(rad)
     # midpoints
     for i in range(0, len(rp_n2s2)-1):
         rp_n2s2[i] = np.nanmean(n2s2_met[np.where((rad>=r_edge[i]) & (rad<r_edge[i+1]))])
@@ -364,88 +374,19 @@ def six_pannel(plateifu, plate, ifu, mass, mass_err, reff):
         r[j] = np.nanmean(rad[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
         s[j] = np.nanmean(sfrd[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
         m[j] = np.nanmean(mass[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
+        
+    for k in range(0, len(rp_pp04)-1):
+        rp_pp04[k] = np.nanmean(pp04_met[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])
+        r[k] = np.nanmean(rad[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])
+        s[k] = np.nanmean(sfrd[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])
+        m[k] = np.nanmean(mass[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])    
      
-    ################################################################################################################
-    ###############                ABNORMAL METALLICITY GRADIENT FITTING ADD ON                 ####################
-    ################################################################################################################
-    
-    '''
-    This section of the function fits 4 evenly spaced points between .5-2 Re 
-    to the average metallicity measurements at that interval.
-    '''
-    
-    x = r # Radius / eff Radius
-    y = np.zeros(len(x)) * np.nan
-    for i in range(0, len(y)):
-        y[i] = np.nanmean(n2o2_met[np.where((rad>=r_edge[i]) & (rad<r_edge[i+1]))])
-    
-    print(x,y)
-    x, y = reject_invalid([x.ravel(),y.ravel()]) # returns these arrays where there are no nans
-    print(x,y)
-    # Will continue in loop if x and y arrays contain elements value
-    if (len(x) > 0) & (len(y) > 0):
         
-        low = 0.5 # lower bound on xvals
-        high = 2.0 # upper bounds on xvals
+    ################################################################################################################
+    ############# Creates 6 pannel plots comparing N2O2 and N2S2 indicators side by side ###########################
+    ################################################################################################################
 
-        xvals = np.linspace(low, high, 4) # 4 points creates 3 lines to evaluate slope between 0.5 and 2 Re
-        yinterp = np.interp(xvals, x, y) # Returns the one-dimensional piecewise linear interpolant to a function
-        m2 = np.diff(yinterp)/np.diff(xvals) # Calculates slope of yinterp and xvals
-        slope_diff = np.diff(m2) # Calculates difference in slopes
-        fit_stdev = np.std(y, axis=0) # Calcs standard deviation of metallicity values along fitted line
-        print(yinterp)
-
-        # Calculates ratios of fitted slopes
-        r01 = np.absolute(np.divide(m2[0], m2[1])) # inverse of r01 (r01 = ratio index 0 / index 1)
-        r10 = np.absolute(np.divide(m2[1], m2[0])) # inverse of r10 (to appply to various slope trends)
-        r12 = np.absolute(np.divide(m2[1], m2[2]))
-        r21 = np.absolute(np.divide(m2[2], m2[1]))
-
-        rang = m2*.30 # range of classification of slope ratio (30%)
-        ch_add = m2+rang # adds calculated 30% range to slope measurement to create bounds
-        ch_sub = m2-rang # only calculates for last 2 segments if [:1] is placed at in to index array
-
-        # Will print out statements if galaxy's oxygen abundance gradient has a slope ratio greater than 30%
-        if ((r01 >= .3) & (r01 < 1)) | ((r10 >= .3) & (r10 < 1)) | ((r12 >= .3) & (r12 < 1)) | ((r21 >= .3) & (r21 < 1)):
-        #if ((ch_add[0] >= m2[1]) | (ch_sub[0] <= m2[1]) | (ch_add[1] >= m2[2]) | (ch_sub[1] <= m2[2])):
-            print('Slope Change; ', plateifu)
-            
-        else:
-            print('No Significant Change in Slope; ', plateifu)    
-
-        #### Text in boxes above plot that annotate plot statistics for given galaxy #####
-
-        # Text box on left side of plot
-        textstr_l = 'RAD DIS OF CHOSEN PTS: ' + str(np.around(xvals[0], 3)) +', '+ str(np.around(xvals[1], 3)) +', '+ str(np.around(xvals[2], 3)) +', '+ str(np.around(xvals[3], 3)) +'\n'+ 'SLOPES: ' + str(np.around(m2[0], 3)) +', '+ str(np.around(m2[1],3)) +', '+ str(np.around(m2[2],3))+'\n'+ '30% OF SLOPE: ' + str(np.around(rang[0], 5))+ ', '+ str(np.around(rang[1], 5))+ ', '+ str(np.around(rang[2], 5))+ '\n'+ 'SLOPE DIFF: ' + str(np.around(slope_diff[0], 3))+', '+ str(np.around(slope_diff[1], 3))
-
-        # Text box on right side of plot
-        textstr_r = 'RATIO S1/S2: ' + str(np.around(r01, 3)) +'\n'+'RATIO S2/S1: ' + str(np.around(r10, 3)) +'\n'+ 'RATIO S2/S3: ' + str(np.around(r12, 3)) +'\n'+ 'RATIO S3/S2: ' + str(np.around(r21, 3))
-
-        # INFO WRITTEN TO FITS FILE:
-        output_file = '/Users/jalynkrause/Documents/astro/grad_ratio_1/info.fits/'
-        info_save = fits.writeto('/Users/jalynkrause/Documents/astro/grad_ratio_1/info.fits/', plateifu)
-        
-        
-        # plots figure
-        plt.figtext(0.13, 0.9, textstr_l, bbox=dict(facecolor='white'))
-        plt.figtext(0.8, 0.9, textstr_r, bbox=dict(facecolor='white'))
-        #plt.plot(r, rp_n2o2, color='purple') # plots midpoints
-        plt.plot(xvals, yinterp, '-*', c='lime', lw=3) # plots points found for calculating the slope change
-        plt.axvline(x = 0.5, color='lightgreen', lw=3) # plots vertical line at .5 effective radii
-        plt.axvline(x = 2, color='lightgreen', lw=3) # plots vertical line at 2 effective radii
-        plt.errorbar(rad.ravel(), n2o2_met.ravel(),yerr=n2o2_met_err.ravel(),fmt='o',ecolor='plum', mfc='indigo',mec='indigo',ms=3) # plots metallicity points with error bars
-        plt.title(plateifu)
-        plt.xlabel('R/$R_e$')
-        plt.ylabel('12+log(O/H)')
-        #plt.savefig('/Users/jalynkrause/Documents/astro/grad_ratio_1/plots/' + plateifu + '.png')
-        plt.show()
-        plt.close('all')  
-       
     
-    ################################################################################################################
-    ################################################################################################################
-
-    '''
     # plot for the ratio of O/H for N2S2 metallicity indicator vs. Radius
     plt.subplot(3,2,1)
     plt.scatter(rad, n2s2_met, s=15, color = 'purple')
@@ -507,7 +448,6 @@ def six_pannel(plateifu, plate, ifu, mass, mass_err, reff):
     
     plt.show()
     plt.close()
-    '''
 
 def reject_invalid(variables, bad_flag = None):
     '''
@@ -515,6 +455,7 @@ def reject_invalid(variables, bad_flag = None):
     variables=[variable1,variable2,variable3...]
     bad_flag=a value that denotes bad data e.g. -999
     '''
+
     if type(variables) != list:
         print("please input a list of numpy arrays")
         return
@@ -588,6 +529,7 @@ def n2s2_dopita16_w_errs(ha,n22,s21,s22,ha_err,n22_err,s21_err,s22_err):
     return met, met_err
 
 # Method to get plateifu for given galaxy 
+
 def get_plateifu():
     plateifu = '7958-3702'
     return plateifu
@@ -621,7 +563,7 @@ def main_1():
     
     plot_map(met_n2o2, met_err_n2o2, rad_n2o2, rp_n2o2, met_n2s2, met_err_n2s2, rad_n2s2, rp_n2s2, plateifu, re, cat)
     
-# Main method for generating 6-panel plots    
+# Main method for generating 6-panel plots and add on to fit abnormal met gradients
 def main_2():
   
     # Remaining 46 galaxies
@@ -651,42 +593,490 @@ def main_2():
     '''
     
     ##############################################################################################################
-    ######################                        ADD ON                         #################################
+    ######################           ADD ON FITS ABNORMAL O/H GRADIENTS          #################################
     ##############################################################################################################
     
-    '''
-    gal_list = np.genfromtxt('/Users/jalynkrause/Documents/astro/Good_Galaxies_SPX_3_N2S2.txt',usecols=(0),skip_header=1,dtype='str',delimiter=',')
+    t = Table() # Creates table to fill values later 
+    # Holds PlateIFU
+    name = []
+    mass_arr = []
+    sfrd_arr = []
+    rad_arr = []
+
+    # Holds calculated values of slope for fitted line
+    slope_n2o2 = []
+    slope_n2s2 = []
+    slope_pp04 = []
+
+    # Holds ratio of fitted segments
+    r01_n2o2_arr = []
+    r10_n2o2_arr = []
+    r12_n2o2_arr = []
+    r21_n2o2_arr = []
+
+    r01_n2s2_arr = []
+    r10_n2s2_arr = []
+    r12_n2s2_arr = []
+    r21_n2s2_arr = []
+
+    r01_pp04_arr = []
+    r10_pp04_arr = []
+    r12_pp04_arr = []
+    r21_pp04_arr = []
+
+    # Holds calculated 30% range for categorized slope change
+    rang_n2o2_arr = [] 
+    rang_n2s2_arr = [] 
+    rang_pp04_arr = [] 
+
+    # Holds calculated standard deviation of points from fitted lines
+    fit_stdev_n2o2_arr = []
+    fit_stdev_n2s2_arr = []
+    fit_stdev_pp04_arr = []
     
+    # Empty array to fill with 0 or 1 if there is a slope change for that galaxy
+    slopechange_n2o2 = []
+    slopechange_n2s2 = [] 
+    slopechange_pp04 = [] 
+    
+    gal_list = np.genfromtxt('/Users/jalynkrause/Documents/astro/Good_Galaxies_SPX_3_N2S2.txt',usecols=(0),skip_header=1,dtype='str',delimiter=',')
+  
     for plateifu in gal_list:
         plate, ifu = plateifu.split('-') # splits plateifu numbers into two variables with the numbers before and after '-'
-    ''' 
+        # Indent try loop after this to iterate through all galaxies
+        '''
+        # Bad galaxy
+        plateifu = '8139-3702'
+        plate = '8139'
+        ifu = '3702'
+        '''
+        '''
+        # Good galaxy
+        plateifu = '8137-12703'
+        plate = '8137'
+        ifu= '12703'
+        '''
 
-    plateifu = '7443-9101'
-    plate = '7443' 
-    ifu = '9101'
+        try:
+            hdu = fits.open('/Users/jalynkrause/Documents/astro/SFRD_and_SFRT/' + plateifu + '_SFRD.fits')
+            p3ddir = '/Users/jalynkrause/Documents/astro/pipe3d_maps_all/' 
+            drpall = '/Users/jalynkrause/Documents/astro/drpall-v2_4_3.fits'
+            mass, mass_err = get_massmap(plateifu, p3ddir, drpall)
+            reff = get_reff(plateifu) # gets the effective radius for a specific galaxy
+            plateifu = hdu[1].data['plateifu'][0]
+            sfrd = hdu[1].data['sfrd']
+            sfrt = hdu[1].data['sfrt']
+
+            plt.figure(figsize = (20,9), facecolor = 'white')
+
+            rad = get_radius(plate, ifu) # Elliptical radius in units of arcseconds
+            rad = rad/reff # Radial measurements now in units of Re, was in arcseconds
+
+            # SFR surface density in units of M_sun/yr/kpc^2. It assumes a flat lambdaCDM cosmology with h=0.7, Omega_lambda=0.7, Omega_matter=0.3. SFR surface density is corrected for inclination using the Petrossian b/a values, so they are probably not accurate for highly inclined systems. 
+            sfrd = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/sfr_map.npy')
+
+            sfrd_err = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/sfr_map_err.npy') # Error on the SFRD
+            # Elliptical radius in units of arcseconds
+
+            issf = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/issf.npy') # 1 if a spaxel is considered to be in the star-forming part of the [OIII]/Hb, [NII/Ha] BPT diagram (passes both Kauffmann and Kewley criteria), 0 if not
+            ha_ew = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/ha_ew.npy')
+
+            n2s2_met = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2s2_met.npy') # Dopita N2S2 Halpha metallcity
+
+            n2s2_met_err = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2s2_met_err.npy') # Error on Dopita 2016 metallicity, calculated by standard error propagation
+            n2s2_mask = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2s2_mask.npy') # Mask for N2S2 metallcity. 1 if S/N of all lines used >3
+
+            n2o2_met = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2o2_met.npy') # KD04 [NII]/[OII] metallicity (12+log(O/H)). Not reliable for 12+log(O/H)<8.6
+
+            n2o2_met_err = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2o2_met_err.npy') # Error on the N2O2 metallcity. This is derived by a Monte Carlo method.
+
+            n2o2_mask = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/n2o2_mask.npy') # 1 if ([NII]6583/[NII]6583_err > 3 ) & ([OII]3727/[OII]3727_err > 3) & ([OII]3729/[OII]3729_err > 3 ) & (ha/ha_err>3) & (hb/hb_err > 3), 0 otherwise.
+
+            pp04_met = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/pp04_o3n2_met.npy')
+
+            pp04_met_err = np.load('/Users/jalynkrause/Documents/astro/metallicities/' + plate + '/' + ifu + '/pp04_o3n2_met_err.npy')
+
+            n2o2_bad = (n2o2_mask == 0) | (issf == 0) | (n2o2_met_err > 0.1) | (ha_ew < 6)
+            n2o2_met[n2o2_bad] = np.nan
+            n2o2_met_err[n2o2_bad] = np.nan
+            n2o2_met[n2o2_met < 8.6] = np.nan # Metallicities below 8.6 are not reliable with this indicator
+
+            n2s2_bad = (n2s2_mask == 0) | (issf == 0) | (n2s2_met_err > 0.1) | (ha_ew < 6)
+            n2s2_met_err[n2s2_bad] =np.nan
+            n2s2_met[n2s2_bad] = np.nan
+
+            pp04_bad = (issf == 0) | (pp04_met_err > 0.1) | (ha_ew < 6)
+            pp04_met_err[pp04_bad] =np.nan
+            pp04_met[pp04_bad] = np.nan
+
+            bad_mass = mass < 3
+            mass[bad_mass] = np.nan
+
+            sfrd_bad = (issf == 0)
+            sfrd[sfrd_bad] = np.nan
+
+            # Requires a galaxy to have an effective radius greater than 1.5, and more than 100 metallicity data points
+            if (np.max(rad) < 1.5) | ((len(n2o2_met)*len(n2o2_met[0])) < 100) | ((len(n2s2_met)*len(n2s2_met[0])) < 100) | ((len(pp04_met)*len(pp04_met[0])) < 100):
+                print('FLAGGED! Insufficient Data; Galaxy PlateIFU: ' + plateifu)
+                
+                name = np.append(name, plateifu) # numpy.append() puts next plateIFU at END of array
+                mass_arr = np.append(mass_arr, [-999])
+                sfrd_arr = np.append(sfrd_arr, [-999])
+                rad_arr = np.append(rad_arr, [-999]) 
+
+                slope_n2o2 = np.append(slope_n2o2, [-999,-999,-999])
+                slopechange_n2o2 = np.append(slopechange_n2o2, -999)
+                
+                rang_n2o2_arr = np.append(rang_n2o2_arr, -999)
+
+                r01_n2o2_arr = np.append(r01_n2o2_arr, -999)
+                r10_n2o2_arr = np.append(r10_n2o2_arr, -999)
+                r12_n2o2_arr = np.append(r12_n2o2_arr, -999)
+                r21_n2o2_arr = np.append(r21_n2o2_arr, -999)
+
+                fit_stdev_n2o2_arr = np.append(fit_stdev_n2o2_arr, -999)
+
+                slope_n2s2 = np.append(slope_n2s2, [-999,-999,-999])
+                slopechange_n2s2 = np.append(slopechange_n2s2, -999)
+
+                rang_n2s2_arr = np.append(rang_n2s2_arr, -999)
+
+                r01_n2s2_arr = np.append(r01_n2s2_arr, -999)
+                r10_n2s2_arr = np.append(r10_n2s2_arr, -999)
+                r12_n2s2_arr = np.append(r12_n2s2_arr, -999)
+                r21_n2s2_arr = np.append(r21_n2s2_arr, -999)
+
+                fit_stdev_n2s2_arr = np.append(fit_stdev_n2s2_arr, -999)
+
+                slope_pp04 = np.append(slope_pp04, [-999,-999,-999])
+                slopechange_pp04 = np.append(slopechange_pp04, -999)
+
+                rang_pp04_arr = np.append(rang_pp04_arr, -999)
+
+                r01_pp04_arr = np.append(r01_pp04_arr, -999)
+                r10_pp04_arr = np.append(r10_pp04_arr, -999)
+                r12_pp04_arr = np.append(r12_pp04_arr, -999)
+                r21_pp04_arr = np.append(r21_pp04_arr, -999)
+
+                fit_stdev_pp04_arr = np.append(fit_stdev_pp04_arr, -999)
+
+            else: # Continues on in loop if there is sufficient data
+            
+                rmax = int(np.max(rad))
+                r_edge = np.linspace(0,rmax,len(rad))
+                r = np.zeros(len(r_edge) -1) * np.nan # radius
+                s = np.zeros(len(r_edge) -1) * np.nan # SFRD
+                m = np.zeros(len(r_edge) -1) * np.nan # stellar mass surface density
+                rp_n2s2 = np.zeros(len(r_edge) -1) * np.nan # rp = the average value of metallicity at that radius
+                rp_n2o2 = np.zeros(len(r_edge) -1) * np.nan
+                rp_pp04 = np.zeros(len(r_edge)-1) * np.nan
+
+                # midpoints
+                for i in range(0, len(rp_n2s2)-1):
+                    rp_n2s2[i] = np.nanmean(n2s2_met[np.where((rad>=r_edge[i]) & (rad<r_edge[i+1]))])
+                    r[i] = np.nanmean(rad[np.where((rad>=r_edge[i]) & (rad<r_edge[i+1]))])
+                    s[i] = np.nanmean(sfrd[np.where((rad>=r_edge[i]) & (rad<r_edge[i+1]))])
+                    m[i] = np.nanmean(mass[np.where((rad>=r_edge[i]) & (rad<r_edge[i+1]))])
+
+                for j in range(0, len(rp_n2o2)-1):
+                    rp_n2o2[j] = np.nanmean(n2o2_met[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
+                    r[j] = np.nanmean(rad[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
+                    s[j] = np.nanmean(sfrd[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
+                    m[j] = np.nanmean(mass[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
+
+                for k in range(0, len(rp_pp04)-1):
+                    rp_pp04[k] = np.nanmean(pp04_met[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])
+                    r[k] = np.nanmean(rad[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])
+                    s[k] = np.nanmean(sfrd[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])
+                    m[k] = np.nanmean(mass[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])    
+
+                '''
+                This section of the function fits 4 evenly spaced points between .5-2 Re 
+                to the average metallicity measurements at that interval.
+                '''
+
+                x = r # in units of radius / effective radius
+
+                y_n2o2 = np.zeros(len(x)) * np.nan # y-values for each indicator
+                y_n2s2 = np.zeros(len(x)) * np.nan
+                y_pp04 = np.zeros(len(x)) * np.nan
+
+                for i in range(0, len(y_n2o2)):
+                    y_n2o2[i] = np.nanmean(n2o2_met[np.where((rad>=r_edge[i]) & (rad<r_edge[i+1]))])
+                for j in range(0, len(y_n2s2)):    
+                    y_n2s2[j] = np.nanmean(n2s2_met[np.where((rad>=r_edge[j]) & (rad<r_edge[j+1]))])
+                for k in range(0, len(y_pp04)):     
+                    y_pp04[k] = np.nanmean(pp04_met[np.where((rad>=r_edge[k]) & (rad<r_edge[k+1]))])
+
+                x, y_n2o2, y_n2s2, y_pp04 = reject_invalid([x.ravel(),y_n2o2.ravel(),y_n2s2.ravel(),y_pp04.ravel()]) # returns these arrays where there are no nans
+
+                # Will continue in loop if x and y array for certain indicator contain elements
+                if (len(x) > 0) & (len(y_n2o2) > 0) & (len(y_n2s2) > 0) & (len(y_pp04) > 0):
+
+                    low = 0.5 # lower bound on xvals
+                    high = 2.0 # upper bounds on xvals
+
+                    xvals = np.linspace(low, high, 4) # 4 points creates 3 lines to evaluate slope between 0.5 and 2 Re
+
+                    #### N2O2 ##################################################################
+                    yinterp_n2o2 = np.interp(xvals, x, y_n2o2) # Returns the one-dimensional piecewise linear interpolant to a function
+                    m2_n2o2 = np.diff(yinterp_n2o2)/np.diff(xvals) # Calculates slope of yinterp and xvals
+                    slope_diff_n2o2 = np.diff(m2_n2o2) # Calculates difference in slopes
+                    fit_stdev_n2o2 = np.std(y_n2o2, axis=0) # Calcs standard deviation of metallicity values along fitted line
+
+                    # Calculates ratios of fitted slopes
+                    r01_n2o2 = np.absolute(np.divide(m2_n2o2[0], m2_n2o2[1])) # inverse of r01 (r01 = ratio index 0 / index 1)
+                    r10_n2o2 = np.absolute(np.divide(m2_n2o2[1], m2_n2o2[0])) # inverse of r10 (to appply to various slope trends)
+                    r12_n2o2 = np.absolute(np.divide(m2_n2o2[1], m2_n2o2[2]))
+                    r21_n2o2 = np.absolute(np.divide(m2_n2o2[2], m2_n2o2[1]))
+
+                    rang_n2o2 = m2_n2o2*.30 # range of classification of slope ratio (30%)
+                    ch_add_n2o2 = m2_n2o2+rang_n2o2 # adds calculated 30% range to slope measurement to create bounds
+                    ch_sub_n2o2 = m2_n2o2-rang_n2o2 # only calculates for last 2 segments if [:1] is placed at in to index array 
+
+                    # Will print out statements if galaxy's oxygen abundance gradient has a slope ratio greater than 30%
+                    if ((r01_n2o2 >= .3) & (r01_n2o2 < 1)) | ((r10_n2o2 >= .3) & (r10_n2o2 < 1)) | ((r12_n2o2 >= .3) & (r12_n2o2 < 1)) | ((r21_n2o2 >= .3) & (r21_n2o2 < 1)):
+                        print('Slope Change in N2O2; ', plateifu)
+                        slopechange_n2o2 = np.append(slopechange_n2o2, 1) # 1 for true (true there is a change in slope)
+
+                    else:
+                        print('No Significant Change in Slope in N2O2; ', plateifu)
+                        slopechange_n2o2 = np.append(slopechange_n2o2, 0) # 0 for false
+                    ############################################################################
+                    ############################################################################
+
+                    #### N2S2 ###################################################################
+                    yinterp_n2s2 = np.interp(xvals, x, y_n2s2) # Returns the one-dimensional piecewise linear interpolant to a function
+                    m2_n2s2 = np.diff(yinterp_n2s2)/np.diff(xvals) # Calculates slope of yinterp and xvals
+                    slope_diff_n2s2 = np.diff(m2_n2s2) # Calculates difference in slopes
+                    fit_stdev_n2s2 = np.std(y_n2s2, axis=0) # Calcs standard deviation of metallicity values along fitted line
+
+                    # Calculates ratios of fitted slopes
+                    r01_n2s2 = np.absolute(np.divide(m2_n2s2[0], m2_n2s2[1])) # inverse of r01 (r01 = ratio index 0 / index 1)
+                    r10_n2s2 = np.absolute(np.divide(m2_n2s2[1], m2_n2s2[0])) # inverse of r10 (to appply to various slope trends)
+                    r12_n2s2 = np.absolute(np.divide(m2_n2s2[1], m2_n2s2[2]))
+                    r21_n2s2 = np.absolute(np.divide(m2_n2s2[2], m2_n2s2[1]))
+
+                    rang_n2s2 = m2_n2s2*.30 # range of classification of slope ratio (30%)
+                    ch_add_n2s2 = m2_n2s2+rang_n2s2 # adds calculated 30% range to slope measurement to create bounds
+                    ch_sub_n2s2 = m2_n2s2-rang_n2s2 # only calculates for last 2 segments if [:1] is placed at in to index array
+
+                    # Will print out statements if galaxy's oxygen abundance gradient has a slope ratio greater than 30%
+                    if ((r01_n2s2 >= .3) & (r01_n2s2 < 1)) | ((r10_n2s2 >= .3) & (r10_n2s2 < 1)) | ((r12_n2s2 >= .3) & (r12_n2s2 < 1)) | ((r21_n2s2 >= .3) & (r21_n2s2 < 1)):
+                        print('Slope Change in N2S2; ', plateifu)
+                        slopechange_n2s2 = np.append(slopechange_n2s2, 1) # 1 for true (true there is a change in slope)
+
+                    else:
+                        print('No Significant Change in Slope in N2S2; ', plateifu)
+                        slopechange_n2s2 = np.append(slopechange_n2s2, 0) # 0 for false
+                    ##############################################################################
+                    ##############################################################################
+
+                    #### PPO4 ###################################################################
+                    yinterp_pp04 = np.interp(xvals, x, y_pp04) # Returns the one-dimensional piecewise linear interpolant to a function
+                    m2_pp04 = np.diff(yinterp_pp04)/np.diff(xvals) # Calculates slope of yinterp and xvals
+                    slope_diff_pp04 = np.diff(m2_pp04) # Calculates difference in slopes
+                    fit_stdev_pp04 = np.std(y_pp04, axis=0) # Calcs standard deviation of metallicity values along fitted line
+
+                    # Calculates ratios of fitted slopes
+                    r01_pp04 = np.absolute(np.divide(m2_pp04[0], m2_pp04[1])) # inverse of r01 (r01 = ratio index 0 / index 1)
+                    r10_pp04 = np.absolute(np.divide(m2_pp04[1], m2_pp04[0])) # inverse of r10 (to appply to various slope trends)
+                    r12_pp04 = np.absolute(np.divide(m2_pp04[1], m2_pp04[2]))
+                    r21_pp04 = np.absolute(np.divide(m2_pp04[2], m2_pp04[1]))
+
+                    rang_pp04 = m2_pp04*.30 # range of classification of slope ratio (30%)
+                    ch_add_pp04 = m2_pp04+rang_pp04 # adds calculated 30% range to slope measurement to create bounds
+                    ch_sub_pp04 = m2_pp04-rang_pp04 # only calculates for last 2 segments if [:1] is placed at in to index array
+
+                    # Will print out statements if galaxy's oxygen abundance gradient has a slope ratio greater than 30%
+                    if ((r01_pp04 >= .3) & (r01_pp04 < 1)) | ((r10_pp04 >= .3) & (r10_pp04 < 1)) | ((r12_pp04 >= .3) & (r12_pp04 < 1)) | ((r21_pp04 >= .3) & (r21_pp04 < 1)):
+                        print('Slope Change in PP04; ', plateifu)
+                        slopechange_pp04 = np.append(slopechange_pp04, 1) # 1 for true (true there is a change in slope)
+
+                    else:
+                        print('No Significant Change in Slope in PP04; ', plateifu)
+                        slopechange_pp04 = np.append(slopechange_pp04, 0) # 0 for false 
+                    ##############################################################################
+                    ##############################################################################
+
+                    # PLOTS FIGURE
+                    plt.plot(xvals, yinterp_n2o2, '-*', c='deeppink', lw=2, zorder=10, alpha=0.2, ms=10) # plots points found for calculating the slope change
+                    plt.plot(xvals, yinterp_n2s2, '-*', c='deeppink', lw=2, zorder=10, alpha=0.2, ms=10) # plots points found for calculating the slope change
+                    plt.plot(xvals, yinterp_pp04, '-*', c='deeppink', lw=2, zorder=10, ms=10) # plots points found for calculating the slope change
+                    plt.axvline(x = 0.5, color='deeppink', lw=1, zorder=10) # plots vertical line at .5 effective radii
+                    plt.axvline(x = 2, color='deeppink', lw=1, zorder=10) # plots vertical line at 2 effective radii
+                    plt.errorbar(rad.ravel(), n2o2_met.ravel(),yerr=n2o2_met_err.ravel(),fmt='o',ecolor='aqua', mfc='navy',mec='navy',ms=3, label='N2O2', alpha=0.1) # plots metallicity points with error bars
+                    plt.errorbar(rad.ravel(), n2s2_met.ravel(),yerr=n2s2_met_err.ravel(),fmt='o',ecolor='lime', mfc='green',mec='green',ms=3, label='N2S2', alpha=0.1) # plots metallicity points with error bars
+                    plt.errorbar(rad.ravel(), pp04_met.ravel(),yerr=pp04_met_err.ravel(),fmt='o',ecolor='plum', mfc='indigo',mec='indigo',ms=3, label='PP04') # plots metallicity points with error bars
+                    plt.ylim()
+                    plt.title(plateifu)
+                    plt.xlabel('R/$R_e$')
+                    plt.ylabel('12+log(O/H)')
+                    plt.legend(loc='best')
+                    plt.savefig('/Users/jalynkrause/Documents/astro/grad_ratio_1/plots0706/' + plateifu + '.png')
+                    #plt.show()
+                    plt.close('all')
+
+                    ##############################################################################
+                    ############### Writes data to fits file #####################################
+                    ##############################################################################
+
+
+                    name = np.append(name, plateifu) # numpy.append() puts next plateIFU at END of array
+                    mass_arr = np.append(mass_arr, mass)
+                    sfrd_arr = np.append(sfrd_arr, sfrd)
+                    rad_arr = np.append(rad_arr, rad)
+
+                    # Will add array of values to end of current array for given plate ifu. If no values, adds nans in place.     
+                    if len(m2_n2o2) > 0:  
+                        slope_n2o2 = np.append(slope_n2o2, m2_n2o2)
+
+                        rang_n2o2_arr = np.append(rang_n2o2_arr, rang_n2o2_arr)
+
+                        r01_n2o2_arr = np.append(r01_n2o2_arr, r01_n2o2)
+                        r10_n2o2_arr = np.append(r10_n2o2_arr, r10_n2o2)
+                        r12_n2o2_arr = np.append(r12_n2o2_arr, r12_n2o2)
+                        r21_n2o2_arr = np.append(r21_n2o2_arr, r21_n2o2)
+
+                        fit_stdev_n2o2_arr = np.append(fit_stdev_n2o2_arr, fit_stdev_n2o2)
+                    else:
+                        slope_n2o2 = np.append(slope_n2o2, np.nan)
+
+                        rang_n2o2_arr = np.append(rang_n2o2_arr, np.nan)
+
+                        r01_n2o2_arr = np.append(r01_n2o2_arr, np.nan)
+                        r10_n2o2_arr = np.append(r10_n2o2_arr, np.nan)
+                        r12_n2o2_arr = np.append(r12_n2o2_arr, np.nan)
+                        r21_n2o2_arr = np.append(r21_n2o2_arr, np.nan)
+
+                        fit_stdev_n2o2_arr = np.append(fit_stdev_n2o2_arr, np.nan)
+
+                    if len(m2_n2s2) > 0:    
+                        slope_n2s2 = np.append(slope_n2s2, m2_n2s2)
+
+                        rang_n2s2_arr = np.append(rang_n2s2_arr, rang_n2s2_arr)
+
+                        r01_n2s2_arr = np.append(r01_n2s2_arr, r01_n2s2)
+                        r10_n2s2_arr = np.append(r10_n2s2_arr, r10_n2s2)
+                        r12_n2s2_arr = np.append(r12_n2s2_arr, r12_n2s2)
+                        r21_n2s2_arr = np.append(r21_n2s2_arr, r21_n2s2)
+
+                        fit_stdev_n2s2_arr = np.append(fit_stdev_n2s2_arr, fit_stdev_n2s2)
+                    else:
+                        slope_n2s2 = np.append(slope_n2s2, np.nan)
+
+                        rang_n2s2_arr = np.append(rang_n2s2_arr, np.nan)
+
+                        r01_n2s2_arr = np.append(r01_n2s2_arr, np.nan)
+                        r10_n2s2_arr = np.append(r10_n2s2_arr, np.nan)
+                        r12_n2s2_arr = np.append(r12_n2s2_arr, np.nan)
+                        r21_n2s2_arr = np.append(r21_n2s2_arr, np.nan)
+
+                        fit_stdev_n2s2_arr = np.append(fit_stdev_n2s2_arr, np.nan)
+
+                    if len(m2_pp04) > 0:    
+                        slope_pp04 = np.append(slope_pp04, m2_pp04)
+
+                        rang_pp04_arr = np.append(rang_pp04_arr, rang_pp04_arr)
+
+                        r01_pp04_arr = np.append(r01_pp04_arr, r01_pp04)
+                        r10_pp04_arr = np.append(r10_pp04_arr, r10_pp04)
+                        r12_pp04_arr = np.append(r12_pp04_arr, r12_pp04)
+                        r21_pp04_arr = np.append(r21_pp04_arr, r21_pp04)
+
+                        fit_stdev_pp04_arr = np.append(fit_stdev_pp04_arr, fit_stdev_pp04)
+                    else:
+                        slope_pp04 = np.append(slope_pp04, np.nan)
+
+                        rang_pp04_arr = np.append(rang_pp04_arr, np.nan)
+
+                        r01_pp04_arr = np.append(r01_pp04_arr, np.nan)
+                        r10_pp04_arr = np.append(r10_pp04_arr, np.nan)
+                        r12_pp04_arr = np.append(r12_pp04_arr, np.nan)
+                        r21_pp04_arr = np.append(r21_pp04_arr, np.nan)
+
+                        fit_stdev_pp04_arr = np.append(fit_stdev_pp04_arr, np.nan)
+                    
+        except (OSError, IOError):
+            print('File Not Found Exception; Galaxy PlateIFU: ' + plateifu)
+            print('Error on Line {}'.format(sys.exc_info()[-1].tb_lineno))
+
+        except (TypeError):
+            print('Type Error Raised; Galaxy PlateIFU: ' + plateifu)
+            print('Error on Line {}'.format(sys.exc_info()[-1].tb_lineno))
     
+    slope_n2o2_0 = []
+    slope_n2o2_1 = []
+    slope_n2o2_2 = []
+
+    slope_n2s2_0 = []
+    slope_n2s2_1 = []
+    slope_n2s2_2 = []
+
+    slope_pp04_0 = []
+    slope_pp04_1 = []
+    slope_pp04_2 = []
+
+    slope_n2o2_0 = slope_n2o2[0]
+    slope_n2o2_1 = slope_n2o2[1]
+    slope_n2o2_2 = slope_n2o2[2]
+
+    slope_n2s2_0 = slope_n2s2[0]
+    slope_n2s2_1 = slope_n2s2[1]
+    slope_n2s2_2 = slope_n2s2[2]
+
+    slope_pp04_0 = slope_pp04[0]
+    slope_pp04_1 = slope_pp04[1]
+    slope_pp04_2 = slope_pp04[2]
+
     try:
-        hdu = fits.open('/Users/jalynkrause/Documents/astro/SFRD_and_SFRT/' + plateifu + '_SFRD.fits')
-        p3ddir = '/Users/jalynkrause/Documents/astro/pipe3d_maps_all/' 
-        drpall = '/Users/jalynkrause/Documents/astro/drpall-v2_4_3.fits'
-        mass, mass_err = get_massmap(plateifu, p3ddir, drpall)
+        # Defines the columns of table to write all data to
+        t['PLATEIFU']=Column(name, description = 'MaNGA PlateIFU')
+        t['MASS']=Column(mass_arr, description = 'Mass')
+        t['SFRD']=Column(sfrd_arr, description = 'SFR Surface Density')
+        t['RAD']=Column(rad_arr, description = 'Radii [R/R_e]')
 
-        reff = get_reff(plateifu) # gets the effective radius for a specific galaxy
+        t['SLOPE_CH_N2O2']=Column(slopechange_n2o2, description = 'N2O2: 1=Slope Change, 0=No Slope Change, -999=Flag')
+        t['SLOPE_VAL_N2O2_0']=Column(slope_n2o2_0, description = 'N2O2: Calculated Slope Values (line 0)')
+        t['SLOPE_VAL_N2O2_1']=Column(slope_n2o2_1, description = 'N2O2: Calculated Slope Values (line 1)')
+        t['SLOPE_VAL_N2O2_2']=Column(slope_n2o2_2, description = 'N2O2: Calculated Slope Values (line 2)')
+        t['30RANGE_N202']=Column(rang_n2o2_arr, description = 'N2O2: 30% of O/H val')
+        t['R01_N2O2']=Column(r01_n2o2_arr, description = 'N2O2: Ratio of line 0/line 1')
+        t['R10_N2O2']=Column(r10_n2o2_arr, description = 'N2O2: Ratio of line 1/line 0')
+        t['R12_N2O2']=Column(r12_n2o2_arr, description = 'N2O2: Ratio of line 1/line 2')
+        t['R21_N2O2']=Column(r21_n2o2_arr, description = 'N2O2: Ratio of line 2/line 1')
+        t['STDEV_N2O2']=Column(fit_stdev_n2o2_arr, description = 'N2O2: Std. dev. of points from fitted line')
 
-        plateifu = hdu[1].data['plateifu'][0]
-        sfrd = hdu[1].data['sfrd']
-        sfrt = hdu[1].data['sfrt']
+        t['SLOPE_CH_N2S2']=Column(slopechange_n2s2, description = 'N2S2: 1=Slope Change, 0=No Slope Change')
+        t['SLOPE_VAL_N2S2_0']=Column(slope_n2s2_0, description = 'N2S2: Calculated Slope Values (line 0)')
+        t['SLOPE_VAL_N2S2_1']=Column(slope_n2s2_1, description = 'N2S2: Calculated Slope Values (line 1)')
+        t['SLOPE_VAL_N2S2_2']=Column(slope_n2s2_2, description = 'N2S2: Calculated Slope Values (line 2)')
+        t['30RANGE_N2S2']=Column(rang_n2s2_arr, description = 'N2S2: 30% of O/H val')
+        t['R01_N2S2']=Column(r01_n2s2_arr, description = 'N2S2: Ratio of line 0/line 1')
+        t['R10_N2S2']=Column(r10_n2s2_arr, description = 'N2S2: Ratio of line 1/line 0')
+        t['R12_N2S2']=Column(r12_n2s2_arr, description = 'N2S2: Ratio of line 1/line 2')
+        t['R21_N2S2']=Column(r21_n2s2_arr, description = 'N2S2: Ratio of line 2/line 1')
+        t['STDEV_N2S2']=Column(fit_stdev_n2s2_arr, description = 'N2S2: Std. dev. of points from fitted line')
 
-        six_pann = six_pannel(plateifu, plate, ifu, mass, mass_err, reff)
+        t['SLOPE_CH_PP04']=Column(slopechange_pp04, description = 'PP04: 1=Slope Change, 0=No Slope Change')
+        t['SLOPE_VAL_PP04_0']=Column(slope_pp04_0, description = 'PP04: Calculated Slope Values (line 0)')
+        t['SLOPE_VAL_PP04_1']=Column(slope_pp04_1, description = 'PP04: Calculated Slope Values (line 1)')
+        t['SLOPE_VAL_PP04_2']=Column(slope_pp04_2, description = 'PP04: Calculated Slope Values (line 2)')
+        t['30RANGE_PP04']=Column(rang_pp04_arr, description = 'PP04: 30% of O/H val')
+        t['R01_PP04']=Column(r01_pp04_arr, description = 'PP04: Ratio of line 0/line 1')
+        t['R10_PP04']=Column(r10_pp04_arr, description = 'PP04: Ratio of line 1/line 0')
+        t['R12_PP04']=Column(r12_pp04_arr, description = 'PP04: Ratio of line 1/line 2')
+        t['R21_PP04']=Column(r21_pp04_arr, description = 'PP04: Ratio of line 2/line 1')
+        t['STDEV_PP04']=Column(fit_stdev_pp04_arr, description = 'PP04: Std. dev. of points from fitted line')
 
-    except (OSError, IOError):
-        print('File Not Found Exception; Galaxy PlateIFU: ' + plateifu)
+        t.write('/Users/jalynkrause/Documents/astro/grad_ratio_1/output_file.fits', overwrite = True) 
+
+    except (ValueError):
+        print('ValueError Raised in Table')
+        print('Error on Line {}'.format(sys.exc_info()[-1].tb_lineno))
         plateifu += plateifu
-        
-    ##############################################################################################################
-    ##############################################################################################################
-    
-# Main method for generating radial O/H metallicity color map of galaxy for specific ifu                         
+
+ # Main method for generating radial O/H metallicity color map of galaxy for specific ifu                         
 def main_3():
     plateifu = get_plateifu()
     plt = oh_map(plateifu)
@@ -735,6 +1125,15 @@ def main_4():
 main_2()
 #main_3()
 #main_4()
+
+def test():
+    hdu = fits.open('/Users/jalynkrause/Documents/astro/grad_ratio_1/output_file.fits')
+    data = hdu[1].data 
+    h = [1,2,3]
+    print(h[0])
+    
+#test()    
+    
 
 ################################################################################################################################# 
 ################################################################################################################################# 
