@@ -18,7 +18,7 @@ import os
 import sys
 import scipy.stats.distributions as dist # from Ewan Cameron's paper
 
-# Ignores annyoying warnings
+# Ignores annoying warnings
 plt.rcParams.update({'figure.max_open_warning': 0})
 np.seterr(divide='ignore', invalid='ignore')
 warnings.simplefilter("ignore")
