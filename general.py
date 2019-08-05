@@ -883,11 +883,10 @@ def main_2():
                 ##############################################################################
 
                 name = np.append(name, plateifu) # numpy.append() puts next plateIFU at END of array
-                '''
+          
                 mass_arr = np.append(mass_arr, mass)
                 sfrd_arr = np.append(sfrd_arr, sfrd)
                 rad_arr = np.append(rad_arr, rad)
-                '''
 
                 # Will add array of values to end of current array for given plate ifu. If no values, adds nans in place.     
                 #if len(m2_n2o2) > 0:  
