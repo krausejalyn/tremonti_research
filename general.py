@@ -1,3 +1,6 @@
+# CODE WRITTEN BY JALYN KRAUSE + COLLABORATORS 
+# LAST EDITED ON AUGUST 13TH, 2019
+
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import figure
 from astropy.io import fits
@@ -17,7 +20,7 @@ import warnings
 import random
 import os
 import sys
-import scipy.stats.distributions as dist # from Ewan Cameron's paper
+#import scipy.stats.distributions as dist # from Ewan Cameron's paper
 
 # Ignores annoying warnings
 plt.rcParams.update({'figure.max_open_warning': 0})
