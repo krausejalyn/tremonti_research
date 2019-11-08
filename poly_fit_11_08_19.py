@@ -1,3 +1,6 @@
+#   WORKING CODE TO FIND THE RADIAL MEASUREMENTS OF GRADIENTS BEFORE ADDDING CHUNK OF CODE ADAM SEND END OF AUGUST
+
+
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import figure
 from astropy.io import fits
